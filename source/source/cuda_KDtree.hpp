@@ -151,7 +151,7 @@ __global__ void Search(MyCudaArray<Point> P, MyCudaArray<int> result, MyCudaArra
 { //todo : change it to cycle; save should have block
     int id = START + BLOCKID * STRIDE, threadid = id % THREADNUMBER;
 #ifdef DEBUG
-    printf("Search (%d+%d*%d) start; threadid=%d; start and end = (%d %d)\n", START, BLOCKID, STRIDE, threadid, ST[threadid], ED[threadid]);
+    //printf("Search (%d+%d*%d) start; threadid=%d; start and end = (%d %d)\n", START, BLOCKID, STRIDE, threadid, ST[threadid], ED[threadid]);
 #endif
     int startposition = STARTPOSITION[threadid];
     int endposition = startposition + QUERYBLOCKSIZE; // for dist check
@@ -179,11 +179,11 @@ __global__ void Search(MyCudaArray<Point> P, MyCudaArray<int> result, MyCudaArra
         PointQuery ini = Query[nowquery.qid];
         float nowdis = getdistance(now, ini, dim);
         // if (nowquery.pid == 1) {
-        float maxdis = getmaxdistance(now, ini, dim);
-        printf("searching %d %d; ST=%d; ED=%d;  xyz = (%f %f %f), l,r=(%d %d), ini=(%f %f %f);   dis=%f %f\n",
-            nowquery.qid, nowquery.tid, ST[threadid], ED[threadid],
-            now.A[0], now.A[1], now.A[2], now.l, now.r,
-            ini.A[0], ini.A[1], ini.A[2], maxdis, nowdis);
+        //float maxdis = getmaxdistance(now, ini, dim);
+        //printf("searching %d %d; ST=%d; ED=%d;  xyz = (%f %f %f), l,r=(%d %d), ini=(%f %f %f);   dis=%f %f\n",
+        //    nowquery.qid, nowquery.tid, ST[threadid], ED[threadid],
+        //    now.A[0], now.A[1], now.A[2], now.l, now.r,
+        //    ini.A[0], ini.A[1], ini.A[2], maxdis, nowdis);
         // }
         queryList newquery = nowquery;
         if (now.l != -1 && getmaxdistance(P[now.l], ini, dim) <= distance) {
@@ -245,7 +245,7 @@ __host__ void search(Point* v, int point_size, float* query_points, int query_si
         querypoints_cpu[i] = PointQuery();
         for (int k = 0; k < dim; k++)
             querypoints_cpu[i].A[k]=query_points[i * dim + k];
-        printf("%f %f %f\n", querypoints_cpu[i].A[0], querypoints_cpu[i].A[1], querypoints_cpu[i].A[2]);
+        //printf("%f %f %f\n", querypoints_cpu[i].A[0], querypoints_cpu[i].A[1], querypoints_cpu[i].A[2]);
         int block_inside = i / K, bias = i - block_inside * K;
         int block_start = block_inside * BLOCKSIZE + bias;
         if (bias == 0) {
@@ -285,7 +285,7 @@ __host__ void search(Point* v, int point_size, float* query_points, int query_si
     MyCudaArray<int> run(BLOCK);
     //RESTRUCT THREAD
     int all = BLOCK * THREAD;
-    int real_block = std::max(BLOCK, std::min(32, all));
+    int real_block = std::max(BLOCK, std::min(16, all));
     int real_thread = all / real_block;
     Search<<<real_block, real_thread>>>(T, Ans, cnt, QueryPoints,
         QueryList, ST, ED, STARTPOSITION, BLOCKSIZE, mutex, run, distance, dim, THREAD);
