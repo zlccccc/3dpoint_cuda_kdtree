@@ -149,9 +149,9 @@ __global__ void Search(MyCudaArray<Point> P, MyCudaArray<int> result, MyCudaArra
     MyCudaArray<queryList> QueryList, MyCudaArray<int> ST, MyCudaArray<int> ED, MyCudaArray<int> STARTPOSITION, int QUERYBLOCKSIZE,
     Lock mutex, MyCudaArray<int> running, float distance, const int dim, int THREADNUMBER)
 { //todo : change it to cycle; save should have block
-    int id = START + BLOCKID * STRIDE, threadid=id%THREADNUMBER;
+    int id = START + BLOCKID * STRIDE, threadid = id % THREADNUMBER;
 #ifdef DEBUG
-    //printf("Search (%d+%d*%d) start; threadid=%d\n", START, BLOCKID, STRIDE, threadid);
+    printf("Search (%d+%d*%d) start; threadid=%d; start and end = (%d %d)\n", START, BLOCKID, STRIDE, threadid, ST[threadid], ED[threadid]);
 #endif
     int startposition = STARTPOSITION[threadid];
     int endposition = startposition + QUERYBLOCKSIZE; // for dist check
@@ -179,11 +179,11 @@ __global__ void Search(MyCudaArray<Point> P, MyCudaArray<int> result, MyCudaArra
         PointQuery ini = Query[nowquery.qid];
         float nowdis = getdistance(now, ini, dim);
         // if (nowquery.pid == 1) {
-        //     float maxdis = getmaxdistance(now, ini, dim);
-        //     printf("searching %d %d; ST=%d; ED=%d;  xyz = (%f %f %f), l,r=(%d %d), ini=(%f %f %f);   dis=%f %f\n",
-        //         nowquery.qid, nowquery.tid, ST[threadid], ED[threadid],
-        //         now.A[0], now.A[1], now.A[2], now.l, now.r,
-        //         ini.A[0], ini.A[1], ini.A[2], maxdis, nowdis);
+        float maxdis = getmaxdistance(now, ini, dim);
+        printf("searching %d %d; ST=%d; ED=%d;  xyz = (%f %f %f), l,r=(%d %d), ini=(%f %f %f);   dis=%f %f\n",
+            nowquery.qid, nowquery.tid, ST[threadid], ED[threadid],
+            now.A[0], now.A[1], now.A[2], now.l, now.r,
+            ini.A[0], ini.A[1], ini.A[2], maxdis, nowdis);
         // }
         queryList newquery = nowquery;
         if (now.l != -1 && getmaxdistance(P[now.l], ini, dim) <= distance) {
@@ -225,39 +225,35 @@ __host__ void search(Point* v, int point_size, float* query_points, int query_si
     MyCudaArray<queryList> QueryList(query_size * maxcount);
     T.toGPU(v);
 #ifdef DEBUG
-    printf("query_size = %d\n", query_size);
-#endif
-#ifdef DEBUG
     printf("cuda malloc time = %f\n", (clock() - start) / CLOCKS_PER_SEC);
 #endif
     // TODO: split it to multi_block
-    int THREAD = 1, BLOCK = 1;
-    while (THREAD < query_size)
-        THREAD <<= 1;
+    int THREAD = query_size, BLOCK = 1;
     THREAD = std::min(THREAD, 512); //for data parallel
     int K = query_size / THREAD + (query_size % THREAD != 0), BLOCKSIZE = maxcount * K;
     // TODO: split it to multi_block
     //Ans.toGPU(result);
     // get the querylist
-    int *cnt_cpu = (int*)malloc(query_size*sizeof(int));
-    int *st_cpu = (int*)malloc(query_size*sizeof(int)), *ed_cpu = (int*)malloc(query_size* sizeof(int)), *startposition_cpu = (int*)malloc(query_size* sizeof(int));
-    queryList *querylist_cpu = (queryList*)malloc(query_size * maxcount * sizeof(queryList));
-    PointQuery *querypoints_cpu = (PointQuery*)malloc(query_size * sizeof(PointQuery));
+    int* cnt_cpu = (int*)malloc(query_size * sizeof(int));
+    int *st_cpu = (int*)malloc(query_size * sizeof(int)), *ed_cpu = (int*)malloc(query_size * sizeof(int)), *startposition_cpu = (int*)malloc(query_size * sizeof(int));
+    queryList* querylist_cpu = (queryList*)malloc(query_size * maxcount * sizeof(queryList));
+    PointQuery* querypoints_cpu = (PointQuery*)malloc(query_size * sizeof(PointQuery));
     for (int i = 0; i < query_size; i++) {
         // ans_point and position
         int start_anspos = i * maxcount;
-        cnt_cpu[i]=start_anspos;
+        cnt_cpu[i] = start_anspos;
+        querypoints_cpu[i] = PointQuery();
         for (int k = 0; k < dim; k++)
-            querypoints_cpu[i].A[k] = query_points[i * dim + k];
+            querypoints_cpu[i].A[k]=query_points[i * dim + k];
+        printf("%f %f %f\n", querypoints_cpu[i].A[0], querypoints_cpu[i].A[1], querypoints_cpu[i].A[2]);
         int block_inside = i / K, bias = i - block_inside * K;
         int block_start = block_inside * BLOCKSIZE + bias;
         if (bias == 0) {
-            startposition_cpu[block_inside]=block_start;
-            st_cpu[block_inside]=block_start;
+            startposition_cpu[block_inside] = block_start;
+            st_cpu[block_inside] = block_start;
         }
-        queryList tmp_query(i, root);
-        querylist_cpu[block_start]=tmp_query;
-        ed_cpu[block_inside]=block_start+1;
+        querylist_cpu[block_start] = queryList(i, root);
+        ed_cpu[block_inside] = block_start + 1;
     }
 #ifdef DEBUG
     printf("cpu initialize time(real-time) = %f\n", (clock() - start) / CLOCKS_PER_SEC);
@@ -267,10 +263,15 @@ __host__ void search(Point* v, int point_size, float* query_points, int query_si
     ED.toGPU(ed_cpu);
     STARTPOSITION.toGPU(startposition_cpu);
     QueryPoints.toGPU(querypoints_cpu);
+    QueryList.toGPU(querylist_cpu);
     free(st_cpu);
     free(ed_cpu);
     free(querypoints_cpu);
     free(startposition_cpu);
+    free(querylist_cpu);
+#ifdef DEBUG
+    printf("query_size = %d\n", query_size);
+#endif
 #ifdef DEBUG
     printf("cuda initialize time(real-time) = %f\n", (clock() - start) / CLOCKS_PER_SEC);
 #endif
@@ -284,8 +285,8 @@ __host__ void search(Point* v, int point_size, float* query_points, int query_si
     MyCudaArray<int> run(BLOCK);
     //RESTRUCT THREAD
     int all = BLOCK * THREAD;
-    int real_block = max(BLOCK, 32);
-    int real_thread = all/real_block;
+    int real_block = std::max(BLOCK, std::min(32, all));
+    int real_thread = all / real_block;
     Search<<<real_block, real_thread>>>(T, Ans, cnt, QueryPoints,
         QueryList, ST, ED, STARTPOSITION, BLOCKSIZE, mutex, run, distance, dim, THREAD);
     Ans.toCPU(result);
@@ -297,11 +298,12 @@ __host__ void search(Point* v, int point_size, float* query_points, int query_si
     for (int i = 0; i < query_size; i++) {
         int start_anspos = i * maxcount;
         int nowcount = cnt_cpu[i] - start_anspos;
-        if (nowcount > maxcount) printf("WRONG! num_points_inside > maxcount");
+        if (nowcount > maxcount)
+            printf("WRONG! num_points_inside > maxcount");
         max_ans_count = max(max_ans_count, nowcount);
-        std::random_shuffle(result+start_anspos, result+cnt_cpu[i]);
-        for (int k=cnt_cpu[i]; k<start_anspos+maxcount; k++)
-            result[k] = result[k-nowcount];
+        std::random_shuffle(result + start_anspos, result + cnt_cpu[i]);
+        for (int k = cnt_cpu[i]; k < start_anspos + maxcount; k++)
+            result[k] = result[k - nowcount];
         //printf("from %d to %d\n",cnt_cpu[i],start_anspos+maxcount);
     }
 #ifdef DEBUG
