@@ -146,13 +146,15 @@ __device__ inline float getdistance(const Point& now, const PointQuery& ini, con
 }
 
 __global__ void Search(MyCudaArray<Point> P, MyCudaArray<int> result, MyCudaArray<int> pos, MyCudaArray<PointQuery> Query,
-    MyCudaArray<queryList> QueryList, MyCudaArray<int> ST, MyCudaArray<int> ED, MyCudaArray<int> STARTPOSITION, int BLOCKSIZE,
-    Lock mutex, MyCudaArray<int> running, float distance, const int dim)
+    MyCudaArray<queryList> QueryList, MyCudaArray<int> ST, MyCudaArray<int> ED, MyCudaArray<int> STARTPOSITION, int QUERYBLOCKSIZE,
+    Lock mutex, MyCudaArray<int> running, float distance, const int dim, int THREADNUMBER)
 { //todo : change it to cycle; save should have block
-    //printf("Search (%d+%d*%d) start\n", START, BLOCKID, STRIDE);
-    int blockid = START + BLOCKID * STRIDE;
-    int startposition = STARTPOSITION[blockid];
-    int endposition = startposition + BLOCKSIZE; // for dist check
+    int id = START + BLOCKID * STRIDE, threadid=id%THREADNUMBER;
+#ifdef DEBUG
+    //printf("Search (%d+%d*%d) start; threadid=%d\n", START, BLOCKID, STRIDE, threadid);
+#endif
+    int startposition = STARTPOSITION[threadid];
+    int endposition = startposition + QUERYBLOCKSIZE; // for dist check
     //mutex.lock();
     //printf("Q.size = %d (%d %d)\n", Q.size(), START, STRIDE);
     //mutex.unlock();
@@ -161,7 +163,7 @@ __global__ void Search(MyCudaArray<Point> P, MyCudaArray<int> result, MyCudaArra
     while (true) {
         //mutex.lock();
         //printf("lock (%d %d) start\n", START, STRIDE);
-        if (ST[blockid] == ED[blockid]) {
+        if (ST[threadid] == ED[threadid]) {
             //if (*running)
             //continue;
             //else {
@@ -170,27 +172,27 @@ __global__ void Search(MyCudaArray<Point> P, MyCudaArray<int> result, MyCudaArra
             //}
         }
         // printf("running = %d; mutex=%d(%d); %d(%d)\n", *running, mutex,
-        //     *(mutex.mutex), blockid, ED[blockid] - ST[blockid]);
+        //     *(mutex.mutex), threadid, ED[threadid] - ST[threadid]);
         //printf("before pop %d\n", Q.size());
-        queryList nowquery = pop(QueryList, ST[blockid], startposition, endposition);
+        queryList nowquery = pop(QueryList, ST[threadid], startposition, endposition);
         Point now = P[nowquery.tid];
         PointQuery ini = Query[nowquery.qid];
         float nowdis = getdistance(now, ini, dim);
         // if (nowquery.pid == 1) {
         //     float maxdis = getmaxdistance(now, ini, dim);
-        //     printf("searching %d %d %d; ST=%d; ED=%d;  xyz = (%f %f %f), l,r=(%d %d), ini=(%f %f %f);   dis=%f %f\n",
-        //         nowquery.qid, nowquery.pid, nowquery.tid, ST[blockid], ED[blockid],
+        //     printf("searching %d %d; ST=%d; ED=%d;  xyz = (%f %f %f), l,r=(%d %d), ini=(%f %f %f);   dis=%f %f\n",
+        //         nowquery.qid, nowquery.tid, ST[threadid], ED[threadid],
         //         now.A[0], now.A[1], now.A[2], now.l, now.r,
         //         ini.A[0], ini.A[1], ini.A[2], maxdis, nowdis);
         // }
         queryList newquery = nowquery;
         if (now.l != -1 && getmaxdistance(P[now.l], ini, dim) <= distance) {
             newquery.tid = now.l;
-            push(QueryList, ST[blockid], ED[blockid], newquery, startposition, endposition);
+            push(QueryList, ST[threadid], ED[threadid], newquery, startposition, endposition);
         }
         if (now.r != -1 && getmaxdistance(P[now.r], ini, dim) <= distance) {
             newquery.tid = now.r;
-            push(QueryList, ST[blockid], ED[blockid], newquery, startposition, endposition);
+            push(QueryList, ST[threadid], ED[threadid], newquery, startposition, endposition);
         }
         if (nowdis <= distance) {
             //printf("gotit:(push) qid,pid,pos,tid,nowdis=%d %d %d %f\n",nowquery.qid,pos[nowquery.qid], nowquery.tid, nowdis);
@@ -206,13 +208,16 @@ __global__ void Search(MyCudaArray<Point> P, MyCudaArray<int> result, MyCudaArra
         //(*running)--;
         //mutex.unlock();
     }
-    //printf("%d: ED=%d\n", blockid, ED[blockid]);
+    //printf("%d: ED=%d\n", threadid, ED[threadid]);
     //printf("%d ", result.A);
     //printf("in cuda: %d %d %d\n", result[30], result[60], result[61]);
 }
 __host__ void search(Point* v, int point_size, float* query_points, int query_size,
     int maxcount, int* result, float distance, int root, const int dim) // from cpu; search_ids
 { // TODO: run ans metux(for multi process); querylist_size should change
+#ifdef DEBUG
+    double start = clock();
+#endif
     MyCudaArray<Point> T(point_size);
     MyCudaArray<int> Ans(query_size * maxcount), cnt(query_size);
     MyCudaArray<PointQuery> QueryPoints(query_size);
@@ -222,46 +227,72 @@ __host__ void search(Point* v, int point_size, float* query_points, int query_si
 #ifdef DEBUG
     printf("query_size = %d\n", query_size);
 #endif
+#ifdef DEBUG
+    printf("cuda malloc time = %f\n", (clock() - start) / CLOCKS_PER_SEC);
+#endif
     // TODO: split it to multi_block
     int THREAD = 1, BLOCK = 1;
     while (THREAD < query_size)
         THREAD <<= 1;
-    THREAD = std::min(THREAD, 512);
-    BLOCK = std::max(THREAD_BLOCKS / THREAD, 1);
-    BLOCK = std::min(BLOCK, 1);
+    THREAD = std::min(THREAD, 512); //for data parallel
     int K = query_size / THREAD + (query_size % THREAD != 0), BLOCKSIZE = maxcount * K;
     // TODO: split it to multi_block
-    Lock mutex(BLOCK);
-    MyCudaArray<int> run(BLOCK);
     //Ans.toGPU(result);
+    // get the querylist
+    int *cnt_cpu = (int*)malloc(query_size*sizeof(int));
+    int *st_cpu = (int*)malloc(query_size*sizeof(int)), *ed_cpu = (int*)malloc(query_size* sizeof(int)), *startposition_cpu = (int*)malloc(query_size* sizeof(int));
+    queryList *querylist_cpu = (queryList*)malloc(query_size * maxcount * sizeof(queryList));
+    PointQuery *querypoints_cpu = (PointQuery*)malloc(query_size * sizeof(PointQuery));
     for (int i = 0; i < query_size; i++) {
         // ans_point and position
         int start_anspos = i * maxcount;
-        cnt.toGPU(i, &start_anspos);
-        PointQuery nowPointQuery;
+        cnt_cpu[i]=start_anspos;
         for (int k = 0; k < dim; k++)
-            nowPointQuery.A[k] = query_points[i * dim + k];
-        QueryPoints.toGPU(i, &nowPointQuery);
-
+            querypoints_cpu[i].A[k] = query_points[i * dim + k];
         int block_inside = i / K, bias = i - block_inside * K;
         int block_start = block_inside * BLOCKSIZE + bias;
         if (bias == 0) {
-            STARTPOSITION.toGPU(block_inside, &block_start);
-            ST.toGPU(block_inside, &block_start);
+            startposition_cpu[block_inside]=block_start;
+            st_cpu[block_inside]=block_start;
         }
         queryList tmp_query(i, root);
-        QueryList.toGPU(block_start, &tmp_query);
-        block_start++;
-        ED.toGPU(block_inside, &block_start);
+        querylist_cpu[block_start]=tmp_query;
+        ed_cpu[block_inside]=block_start+1;
     }
+#ifdef DEBUG
+    printf("cpu initialize time(real-time) = %f\n", (clock() - start) / CLOCKS_PER_SEC);
+#endif
+    cnt.toGPU(cnt_cpu); // it will be used later; no need to free
+    ST.toGPU(st_cpu);
+    ED.toGPU(ed_cpu);
+    STARTPOSITION.toGPU(startposition_cpu);
+    QueryPoints.toGPU(querypoints_cpu);
+    free(st_cpu);
+    free(ed_cpu);
+    free(querypoints_cpu);
+    free(startposition_cpu);
+#ifdef DEBUG
+    printf("cuda initialize time(real-time) = %f\n", (clock() - start) / CLOCKS_PER_SEC);
+#endif
     //printf("build done ???");
     //printf("BLOCK, STRIDE = %d %d; K=%d; blocksiez=%d\n", BLOCK, THREAD, K, BLOCKSIZE);
-    Search<<<BLOCK, THREAD>>>(T, Ans, cnt, QueryPoints,
-        QueryList, ST, ED, STARTPOSITION, BLOCKSIZE, mutex, run, distance, dim);
-    Ans.toCPU(result);
 
-    int *cnt_cpu, max_ans_count = 0;
-    cnt_cpu = (int*)malloc(query_size*sizeof(int));
+    //multi-thread-for-one-BLOCK(todo)
+    BLOCK = std::max(THREAD_BLOCKS / THREAD, 1);
+    BLOCK = std::min(BLOCK, 1); //BLOCK=1; not it is not used
+    Lock mutex(BLOCK);
+    MyCudaArray<int> run(BLOCK);
+    //RESTRUCT THREAD
+    int all = BLOCK * THREAD;
+    int real_block = max(BLOCK, 32);
+    int real_thread = all/real_block;
+    Search<<<real_block, real_thread>>>(T, Ans, cnt, QueryPoints,
+        QueryList, ST, ED, STARTPOSITION, BLOCKSIZE, mutex, run, distance, dim, THREAD);
+    Ans.toCPU(result);
+#ifdef DEBUG
+    printf("cuda query time(real-time) = %f\n", (clock() - start) / CLOCKS_PER_SEC);
+#endif
+    int max_ans_count = 0;
     cnt.toCPU(cnt_cpu);
     for (int i = 0; i < query_size; i++) {
         int start_anspos = i * maxcount;
